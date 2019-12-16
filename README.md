@@ -41,3 +41,9 @@ Note: If no relicated files remain attempting to remove replication will raise a
 `>>> s.sync_replication()`
 
 Note: If all copies of a file have been deleted, An error will be raised that files cannot be recovered.
+
+## To get a word at a particular index
+
+`>>> s.get_word_at_index(index)`
+
+Note: Returns and prints a tuple including the filename of the file that the index was found in and the word at the index. If on a word of punctuation, it will find the following word (except the very last word of the last file while returns the last word). If a word is split between files it will still return the whole word but still only include the file from which the search was started.

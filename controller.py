@@ -366,6 +366,71 @@ class ShardHandler(object):
         """A helper function to view the mapping data."""
         return self.mapping
 
+    def get_word_at_index(self, index):
+        keys = self.get_shard_ids()
+        largest_key = max(int(key) for key in keys)
+        for key in keys:
+            if (
+                index >= self.mapping[key]['start']
+                and index <= self.mapping[key]['end']
+            ):
+                file = f'./data/{key}.txt'
+                new_index = index - self.mapping[key]['start']
+                with open(file, 'r') as f:
+                    text = f.read()
+                    start_char = text[new_index]
+                    while start_char in ' ,.?!";':
+                        new_index += 1
+                        start_char = text[new_index]
+                    string = text[new_index]
+                    before_index = new_index
+                    after_index = new_index
+                    while before_index != 0 and text[before_index] != ' ':
+                        before_index -= 1
+                        before_char = text[before_index]
+                        string = before_char + string
+                    if before_index == 0:
+                        before_string = self.from_previous_file(
+                            f'./data/{str(int(key) - 1)}.txt')
+                        string = before_string + string
+                    while after_index != len(text) - 1\
+                            and text[after_index] != ' ':
+                        after_index += 1
+                        after_char = text[after_index]
+                        string = string + after_char
+                    if after_index == len(text) - 1\
+                            and key != str(largest_key):
+                        after_string = self.from_following_file(
+                            f'./data/{str(int(key) + 1)}.txt')
+                        string = string + after_string
+                    string = string.strip(' ,.?!";').replace(
+                        '\n', '').replace('.', '')
+                    return (f'{key}.txt', string)
+
+    def from_previous_file(self, file):
+        string = ''
+        with open(file, 'r') as f:
+            text = f.read()
+            last_index = len(text) - 1
+            last_char = text[last_index]
+            while last_char != ' ':
+                string = last_char + string
+                last_index -= 1
+                last_char = text[last_index]
+        return string
+
+    def from_following_file(self, file):
+        string = ''
+        with open(file, 'r') as f:
+            text = f.read()
+            first_index = 0
+            first_char = text[first_index]
+            while first_char != ' ':
+                string = string + first_char
+                first_index += 1
+                first_char = text[first_index]
+        return string
+
 
 s = ShardHandler()
 
