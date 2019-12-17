@@ -9,7 +9,7 @@ filename = "chapter2.txt"
 def load_data_from_file(path=None) -> str:
     with open(path if path else filename, 'r') as f:
         data = f.read()
-    return data
+    return data  # noqa
 
 
 class ShardHandler(object):
@@ -21,6 +21,14 @@ class ShardHandler(object):
     def __init__(self):
         self.mapping = self.load_map()
         self.last_char_position = 0
+        self.replication_level = self.find_highest_replication_level()
+
+    def find_highest_replication_level(self):
+        levels = set()
+        for key in list(self.mapping):
+            if '-' in key:
+                levels.add(int(key.split('-')[1]))
+        return max(levels) if levels else 0
 
     mapfile = "mapping.json"
 
@@ -108,7 +116,9 @@ class ShardHandler(object):
         """Split the data into as many pieces as needed."""
         splicenum, rem = divmod(len(data), count)
 
-        result = [data[splicenum * z:splicenum * (z + 1)] for z in range(count)]
+        result = [
+            data[splicenum * z:splicenum * (z + 1)] for z in range(count)
+        ]
         # take care of any odd characters
         if rem > 0:
             result[-1] += data[-rem:]
@@ -126,6 +136,7 @@ class ShardHandler(object):
 
     def add_shard(self) -> None:
         """Add a new shard to the existing pool and rebalance the data."""
+        self.sync_replication()
         self.mapping = self.load_map()
         data = self.load_data_from_shards()
         keys = [int(z) for z in self.get_shard_ids()]
@@ -146,7 +157,40 @@ class ShardHandler(object):
         """Loads the data from all shards, removes the extra 'database' file,
         and writes the new number of shards to disk.
         """
-        pass
+        self.sync_replication()
+        self.mapping = self.load_map()
+        data = self.load_data_from_shards()
+        keys = [int(z) for z in self.get_shard_ids()]
+        if len(keys) == 1:
+            raise Exception('Cannot remove last shard')
+        keys.sort()
+        new_shard_num = max(keys)
+
+        spliced_data = self._generate_sharded_data(new_shard_num, data)
+
+        files = os.listdir('./data')
+        for filename in files:
+            if '-' not in filename:
+                if str(new_shard_num) == filename.split('.')[0]:
+                    os.remove(f'./data/{filename}')
+            else:
+                if str(new_shard_num) == filename.split('-')[0]:
+                    os.remove(f'./data/{filename}')
+
+        for key in list(self.mapping):
+            if '-' not in key:
+                if key == str(new_shard_num):
+                    self.mapping.pop(key)
+            else:
+                if key.split('-')[0] == str(new_shard_num):
+                    self.mapping.pop(key)
+
+        for num, d in enumerate(spliced_data):
+            self._write_shard(num, d)
+
+        self.write_map()
+
+        self.sync_replication()
 
     def add_replication(self) -> None:
         """Add a level of replication so that each shard has a backup. Label
@@ -163,7 +207,20 @@ class ShardHandler(object):
         to detect how many levels there are and appropriately add the next
         level.
         """
-        pass
+        self.sync_replication()
+        self.replication_level = self.replication_level + 1
+        files = os.listdir('./data')
+        originals = sorted(
+            [filename for filename in files if '-' not in filename])
+        for i, file in enumerate(originals):
+            source = f'./data/{file}'
+            destination = f'./data/{i}-{self.replication_level}.txt'
+            copyfile(source, destination)
+        keys = self.get_shard_ids()
+        for i, key in enumerate(keys):
+            self.mapping[f'{i}-{self.replication_level}'] = self.mapping[key]
+        self.write_map()
+        self.sync_replication()
 
     def remove_replication(self) -> None:
         """Remove the highest replication level.
@@ -186,13 +243,123 @@ class ShardHandler(object):
         2.txt (shard 2, primary)
         etc...
         """
-        pass
+        self.sync_replication()
+        if self.replication_level == 0:
+            raise Exception('No replication levels to remove.')
+        self.replication_level = self.replication_level - 1
+        backup_keys = [key for key in self.get_replication_ids()
+                       if int(key.split('-')[1]) > self.replication_level]
+        for key in backup_keys:
+            self.mapping.pop(key)
+            os.remove(f'./data/{key}.txt')
+        self.write_map()
+        self.sync_replication()
+
+    # def primary_keys_okay(self):
+    #     primaries = self.get_shard_ids()
+    #     for i, key in enumerate(primaries):
+    #         if i != int(key):
+    #             return False
+    #     if self.mapping[primaries[-1]]['end'] != 3735:
+    #         return False
+    #     return True
+
+    def primary_files_okay(self):
+        files = os.listdir('./data')
+        primary_keys = self.get_shard_ids()
+        primary_files = sorted(file for file in files if '-' not in file)
+        for file, key in zip(primary_files, primary_keys):
+            if file.split('.')[0] != key:
+                return False
+        return len(primary_files) == len(primary_keys)
+
+    def create_replication_dict(self):
+        replications = {}
+        for key in self.get_replication_ids():
+            key_level = int(key.split('-')[1])
+            if key_level in replications:
+                replications[key_level].append(key)
+            else:
+                replications[key_level] = [key]
+        return replications
+
+    def rep_level_has_same_keys(self, rep_keys, primary_keys, level):
+        if len(rep_keys) != len(primary_keys):
+            return False
+        for rep_key, primary_key in zip(rep_keys, primary_keys):
+            if rep_key.split('-')[0] != primary_key:
+                return False
+        files = [filename for filename in os.listdir(
+            './data') if '-' in filename]
+        level_files = [filename for filename in files if level ==
+                       filename.split('-')[1]]
+        if len(level_files) != len(primary_keys):
+            return False
+        return True
+
+    def update_replicated_levels(self):
+        for key in self.get_replication_ids():
+            key_name = key.split('-')[0]
+            self.mapping[key] = self.mapping[key_name]
+        primary_keys = self.get_shard_ids()
+        for level, keys in self.create_replication_dict().items():
+            if not self.rep_level_has_same_keys(keys, primary_keys, level):
+                for primary_key in primary_keys:
+                    self.mapping[f'{primary_key}-{level}'] =\
+                        self.mapping[primary_key]
+                    copyfile(f'./data/{primary_key}.txt',
+                             f'./data/{primary_key}-{level}.txt')
+        self.write_map()
+
+    def restore_primary_files(self):
+        x = len(os.listdir('./data'))
+        while not self.primary_files_okay() and x > 0:
+            x = x - 1
+            files = os.listdir('./data')
+            primary_files = []
+            other_files = []
+            for file in files:
+                if '-' not in file:
+                    primary_files.append(file)
+                else:
+                    other_files.append(file)
+            primary_file_numbers = [int(file.split('.')[0])
+                                    for file in primary_files]
+            other_file_numbers = [int(file.split('-')[0])
+                                  for file in other_files]
+            if primary_files:
+                last_primary_file_num = max(primary_file_numbers)
+            if other_file_numbers:
+                other_files_num = max(other_file_numbers)
+            else:
+                other_files_num = -1
+            if not primary_files or last_primary_file_num < other_files_num:
+                copyfile(
+                    f'./data/{other_files[-1]}',
+                    f'./data/{other_files_num}.txt'
+                )
+            for i, file in enumerate(primary_files):
+                if i != int(file.split('.')[0]):
+                    for other_file in other_files:
+                        if i == int(other_file.split('-')[0]):
+                            copyfile(
+                                f'./data/{other_file}',
+                                f'./data/{i}.txt'
+                            )
+                            break
+        if not self.primary_files_okay():
+            raise Exception('Missing files cannot be recovered')
 
     def sync_replication(self) -> None:
         """Verify that all replications are equal to their primaries and that
         any missing primaries are appropriately recreated from their
         replications."""
-        pass
+        if not self.primary_files_okay():
+            if self.replication_level > 0:
+                self.restore_primary_files()
+            else:
+                raise Exception('Backups to missing files do not exist')
+        self.update_replicated_levels()
 
     def get_shard_data(self, shardnum=None) -> [str, Dict]:
         """Return information about a shard from the mapfile."""
@@ -206,6 +373,71 @@ class ShardHandler(object):
     def get_all_shard_data(self) -> Dict:
         """A helper function to view the mapping data."""
         return self.mapping
+
+    def get_word_at_index(self, index):
+        keys = self.get_shard_ids()
+        largest_key = max(int(key) for key in keys)
+        for key in keys:
+            if (
+                index >= self.mapping[key]['start']
+                and index <= self.mapping[key]['end']
+            ):
+                file = f'./data/{key}.txt'
+                new_index = index - self.mapping[key]['start']
+                with open(file, 'r') as f:
+                    text = f.read()
+                    start_char = text[new_index]
+                    while start_char in ' ,.?!";':
+                        new_index += 1
+                        start_char = text[new_index]
+                    string = text[new_index]
+                    before_index = new_index
+                    after_index = new_index
+                    while before_index != 0 and text[before_index] != ' ':
+                        before_index -= 1
+                        before_char = text[before_index]
+                        string = before_char + string
+                    if before_index == 0:
+                        before_string = self.from_previous_file(
+                            f'./data/{str(int(key) - 1)}.txt')
+                        string = before_string + string
+                    while after_index != len(text) - 1\
+                            and text[after_index] != ' ':
+                        after_index += 1
+                        after_char = text[after_index]
+                        string = string + after_char
+                    if after_index == len(text) - 1\
+                            and key != str(largest_key):
+                        after_string = self.from_following_file(
+                            f'./data/{str(int(key) + 1)}.txt')
+                        string = string + after_string
+                    string = string.strip(' ,.?!";').replace(
+                        '\n', '').replace('.', '')
+                    return (f'{key}.txt', string)
+
+    def from_previous_file(self, file):
+        string = ''
+        with open(file, 'r') as f:
+            text = f.read()
+            last_index = len(text) - 1
+            last_char = text[last_index]
+            while last_char != ' ':
+                string = last_char + string
+                last_index -= 1
+                last_char = text[last_index]
+        return string
+
+    def from_following_file(self, file):
+        string = ''
+        with open(file, 'r') as f:
+            text = f.read()
+            first_index = 0
+            first_char = text[first_index]
+            while first_char != ' ':
+                string = string + first_char
+                first_index += 1
+                first_char = text[first_index]
+        return string
 
 
 s = ShardHandler()
