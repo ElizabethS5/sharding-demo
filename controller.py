@@ -161,6 +161,8 @@ class ShardHandler(object):
         self.mapping = self.load_map()
         data = self.load_data_from_shards()
         keys = [int(z) for z in self.get_shard_ids()]
+        if len(keys) == 1:
+            raise Exception('Cannot remove last shard')
         keys.sort()
         new_shard_num = max(keys)
 
