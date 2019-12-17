@@ -329,7 +329,10 @@ class ShardHandler(object):
                                   for file in other_files]
             if primary_files:
                 last_primary_file_num = max(primary_file_numbers)
-            other_files_num = max(other_file_numbers)
+            if other_file_numbers:
+                other_files_num = max(other_file_numbers)
+            else:
+                other_files_num = -1
             if not primary_files or last_primary_file_num < other_files_num:
                 copyfile(
                     f'./data/{other_files[-1]}',
@@ -345,14 +348,17 @@ class ShardHandler(object):
                             )
                             break
         if not self.primary_files_okay():
-            raise Exception('Missing files cannot be recoved')
+            raise Exception('Missing files cannot be recovered')
 
     def sync_replication(self) -> None:
         """Verify that all replications are equal to their primaries and that
         any missing primaries are appropriately recreated from their
         replications."""
         if not self.primary_files_okay():
-            self.restore_primary_files()
+            if self.replication_level > 0:
+                self.restore_primary_files()
+            else:
+                raise Exception('Backups to missing files do not exist')
         self.update_replicated_levels()
 
     def get_shard_data(self, shardnum=None) -> [str, Dict]:
